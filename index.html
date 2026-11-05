@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mugen Tools</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font:14px sans-serif;color:#fff;background:#1b2a4a url(bg.jpg) center top/cover fixed}
+.wrap{min-height:100vh;background:linear-gradient(#0008,#000b);padding:14px}
+.head{display:flex;gap:12px;align-items:center}
+.head img{width:64px;height:64px;border-radius:14px}
+h1{margin:0;font-size:22px}
+.d{font-size:12px;opacity:.85;margin:2px 0 0}
+button,.btn{background:#ff7aa8;color:#fff;border:0;border-radius:10px;padding:11px 14px;font-size:14px;font-weight:bold}
+button.s{background:#ffffff30}
+.row{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap}
+input[type=text]{width:100%;padding:10px;border-radius:10px;border:0;margin-bottom:8px}
+#st{font-size:12px;margin:6px 0;white-space:pre-wrap}
+.sec{margin-top:14px;padding:10px;border-radius:12px;background:#0007}
+.sec h2{font-size:14px;margin:0 0 8px;word-break:break-all}
+.grid{display:flex;flex-wrap:wrap;gap:6px}
+.c{background:repeating-conic-gradient(#ccc 0 25%,#999 0 50%) 0 0/16px 16px;text-align:center;border-radius:6px;overflow:hidden}
+.c img{display:block;image-rendering:pixelated;max-width:140px;max-height:200px;margin:auto}
+.c span{display:block;background:#000a;font:11px monospace;padding:2px}
+.a{margin:6px 0;padding:8px;border-radius:10px;background:#0009}
+.a div{font:12px monospace;margin-bottom:4px}
+audio{width:100%}
+.err{background:#a33;color:#fff;padding:6px;font-size:11px}
+</style></head><body><div class="wrap">
+<div class="head"><img src="icon.png"><div><h1>Mugen Tools</h1>
+<p class="d">Pembaca file MUGEN .sff dan .snd. Pilih file, langsung muncul sprite dan suara. Sprite dan suara bisa diunduh.</p></div></div>
+<div class="row"><button id="pick">Pilih file .sff / .snd</button><button class="s" id="zipb" style="display:none">Unduh semua (ZIP)</button></div>
+<input type="file" id="f" multiple style="display:none">
+<input type="text" id="q" placeholder="Cari nama (mis. 0_1, 5000)">
+<div id="st">Belum ada file dipilih.</div>
+<div id="out"></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const GRAY=new Uint8Array(768);for(let i=0;i<256;i++)GRAY[3*i]=GRAY[3*i+1]=GRAY[3*i+2]=i;
+const dvOf=d=>new DataView(d.buffer,d.byteOffset,d.byteLength);
+const sig=(d,s)=>{for(let i=0;i<s.length;i++)if(d[i]!==s.charCodeAt(i))return false;return d[s.length]===0};
+async function inflate(u){
+  const r=new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream('deflate')));
+  return new Uint8Array(await r.arrayBuffer());
+}
+/* ---------- PNG berindeks (SFF v2 format 10) ---------- */
+async function pngIndeks(b){
+  const v=dvOf(b);let pos=8,w=0,h=0,bd=0,ct=0;const idat=[];
+  while(pos+8<=b.length){
+    const ln=v.getUint32(pos),t=String.fromCharCode(b[pos+4],b[pos+5],b[pos+6],b[pos+7]);
+    const c=b.subarray(pos+8,pos+8+ln);pos+=12+ln;
+    if(t==='IHDR'){w=dvOf(c).getUint32(0);h=dvOf(c).getUint32(4);bd=c[8];ct=c[9]}
+    else if(t==='IDAT')idat.push(c);
+  }
+  if(ct!==3||bd!==8)return null;
+  let tot=0;idat.forEach(x=>tot+=x.length);const z=new Uint8Array(tot);let o=0;idat.forEach(x=>{z.set(x,o);o+=x.length});
+  const raw=await inflate(z);const out=new Uint8Array(w*h);let pv=new Uint8Array(w);
+  for(let y=0;y<h;y++){
+    const f=raw[y*(w+1)];const r=raw.slice(y*(w+1)+1,(y+1)*(w+1));
+    for(let x=0;x<w;x++){
+      const a=x?r[x-1]:0,u=pv[x],cc=x?pv[x-1]:0;
+      if(f===1)r[x]=(r[x]+a)&255;
+      else if(f===2)r[x]=(r[x]+u)&255;
+      else if(f===3)r[x]=(r[x]+((a+u)>>1))&255;
+      else if(f===4){const q=a+u-cc,pa=Math.abs(q-a),pb=Math.abs(q-u),pc=Math.abs(q-cc);
+        r[x]=(r[x]+(pa<=pb&&pa<=pc?a:pb<=pc?u:cc))&255}
+    }
+    out.set(r,y*w);pv=r;
+  }
+  return {w,h,px:out};
+}
+/* ---------- PCX (SFF v1) ---------- */
+function pcx(b){
+  const v=dvOf(b);const w=v.getUint16(8,true)-v.getUint16(4,true)+1,h=v.getUint16(10,true)-v.getUint16(6,true)+1;
+  const bpl=v.getUint16(66,true),tot=bpl*h,out=new Uint8Array(tot);let n=0,i=128;
+  while(n<tot&&i<b.length){
+    const c=b[i++];
+    if(c>=0xC0){const k=c&0x3F,x=b[i++];for(let m=0;m<k&&n<tot;m++)out[n++]=x}
+    else out[n++]=c;
+  }
+  let pal=null;
+  if(b.length>=769&&b[b.length-769]===12)pal=b.slice(b.length-768);
+  const px=new Uint8Array(w*h);
+  for(let y=0;y<h;y++)px.set(out.subarray(y*bpl,y*bpl+w),y*w);
+  return {w,h,px,pal};
+}
+/* ---------- dekompresi SFF v2 ---------- */
+function rle8(s,w,h){
+  const n=w*h,p=new Uint8Array(n),L=s.length;let i=0,j=0;
+  while(j<n&&i<L){
+    let d=s[i++],c=1;
+    if((d&0xc0)===0x40){if(i>=L)break;c=d&0x3f;d=s[i++]}
+    const k=Math.min(c,n-j);p.fill(d,j,j+k);j+=k;
+  }
+  return p;
+}
+function rle5(s,w,h){
+  const n=w*h,p=new Uint8Array(n),L=s.length;let i=0,j=0;
+  while(j<n&&i<L){
+    let rl=s[i++];if(i>=L)break;
+    let dl=s[i]&0x7f,c=0;
+    if(s[i]>>7){i++;if(i>=L)break;c=s[i]}
+    i++;
+    for(;;){
+      if(j<n)p[j++]=c;
+      rl--;
+      if(rl<0){
+        dl--;if(dl<0)break;
+        if(i>=L)return p;
+        c=s[i]&0x1f;rl=s[i]>>5;i++;
+      }
+    }
+  }
+  return p;
+}
+function lz5(s,w,h){
+  const N=w*h,p=new Uint8Array(N),L=s.length;if(!L)return p;
+  let i=1,j=0,ct=s[0],cts=0,rb=0,rbc=0;
+  while(j<N&&i<L){
+    let d=s[i++],n;
+    if(ct&(1<<cts)){
+      if((d&0x3f)===0){d=((d<<2)|s[i++])+1;n=s[i++]+2}
+      else{
+        rb|=(d>>6)<<rbc;rbc+=2;n=d&0x3f;
+        if(rbc<8){d=s[i++]+1}else{d=rb+1;rb=0;rbc=0}
+      }
+      for(;;){if(j<N){p[j]=j-d>=0?p[j-d]:0;j++}n--;if(n<0)break}
+    }else{
+      n=0;
+      if((d&0xe0)===0x40){n=d&0x1f;d=s[i++]}
+      for(;;){if(j<N)p[j++]=d;n--;if(n<0)break}
+    }
+    cts++;if(cts>=8){ct=s[i++];cts=0}
+  }
+  return p;
+}
+/* ---------- SFF ---------- */
+async function* sff1(d){
+  const v=dvOf(d),n=v.getUint32(20,true);let off=v.getUint32(24,true),last=null;const prev=[];
+  for(let k=0;k<n;k++){
+    if(off<=0||off+32>d.length)break;
+    const nxt=v.getUint32(off,true),ln=v.getUint32(off+4,true),ax=v.getInt16(off+8,true),ay=v.getInt16(off+10,true);
+    const g=v.getUint16(off+12,true),i=v.getUint16(off+14,true),lk=v.getUint16(off+16,true),same=d[off+18];
+    let r;
+    if(ln===0){r=prev[lk]?Object.assign({},prev[lk]):{err:'link tidak ditemukan'}}
+    else try{
+      const x=pcx(d.subarray(off+32,off+32+ln));
+      let pal=x.pal;if(same||!pal)pal=last||GRAY;last=pal;
+      r={w:x.w,h:x.h,px:x.px,pal};
+    }catch(e){r={err:String(e)}}
+    prev[k]=r;
+    yield Object.assign({g,i,ax,ay},r);
+    if(!nxt)break;off=nxt;
+  }
+}
+async function* sff2(d){
+  const v=dvOf(d),sh=v.getUint32(36,true),ns=v.getUint32(40,true),ph=v.getUint32(44,true),lo=v.getUint32(52,true),to=v.getUint32(60,true);
+  const pals={};
+  function pal(pi){
+    if(pals[pi])return pals[pi];
+    let q=pi;const seen=new Set();
+    while(ph+16*q+16<=d.length){
+      const o=ph+16*q,lk=v.getUint16(o+6,true),of=v.getUint32(o+8,true),sz=v.getUint32(o+12,true);
+      if(sz){
+        const t=d.subarray(lo+of,lo+of+sz),c=new Uint8Array(768);
+        for(let k=0;k<Math.min(256,sz>>2);k++){c[3*k]=t[4*k];c[3*k+1]=t[4*k+1];c[3*k+2]=t[4*k+2]}
+        return pals[pi]=c;
+      }
+      if(seen.has(q))break;
+      seen.add(q);q=lk;
+    }
+    return GRAY;
+  }
+  const hdr=k=>{const o=sh+28*k;return{g:v.getInt16(o,true),i:v.getInt16(o+2,true),w:v.getUint16(o+4,true),h:v.getUint16(o+6,true),
+    ax:v.getInt16(o+8,true),ay:v.getInt16(o+10,true),lk:v.getUint16(o+12,true),fm:d[o+14],of:v.getUint32(o+16,true),
+    sz:v.getUint32(o+20,true),pi:v.getUint16(o+24,true),fl:v.getUint16(o+26,true)}};
+  for(let k=0;k<ns;k++){
+    let H=hdr(k);const seen=new Set([k]);const base={g:H.g,i:H.i,ax:H.ax,ay:H.ay};
+    while(H.sz===0&&!seen.has(H.lk)&&H.lk<ns){seen.add(H.lk);const t=hdr(H.lk);H=Object.assign({},t,base)}
+    const R=Object.assign({},base,{w:H.w,h:H.h});
+    if(H.sz===0){yield Object.assign(R,{err:'link tidak ditemukan'});continue}
+    const of=H.of+(H.fl&1?to:lo);let b=d.subarray(of,of+H.sz);
+    try{
+      if(H.fm===10||H.fm===11||H.fm===12){
+        let z=-1;for(let m=0;m<b.length-3;m++)if(b[m]===0x89&&b[m+1]===0x50&&b[m+2]===0x4e&&b[m+3]===0x47){z=m;break}
+        if(z>=0)b=b.subarray(z);
+        const r=H.fm===10?await pngIndeks(b):null;
+        if(r)yield Object.assign(R,{w:r.w,h:r.h,px:r.px,pal:pal(H.pi)});
+        else yield Object.assign(R,{png:b});
+        continue;
+      }
+      let px;
+      if(H.fm===2)px=rle8(b.subarray(4),H.w,H.h);
+      else if(H.fm===3)px=rle5(b.subarray(4),H.w,H.h);
+      else if(H.fm===4)px=lz5(b.subarray(4),H.w,H.h);
+      else if(H.fm===0)px=b.length===H.w*H.h?b:b.subarray(4);
+      else{yield Object.assign(R,{err:'format '+H.fm+' belum didukung'});continue}
+      if(px.length!==H.w*H.h)throw new Error('ukuran piksel salah');
+      yield Object.assign(R,{px,pal:pal(H.pi)});
+    }catch(e){yield Object.assign(R,{err:String(e)})}
+  }
+}
+function sffBaca(d){
+  if(!sig(d,'ElecbyteSpr'))throw new Error('bukan file SFF');
+  if(d[15]===1)return[1,sff1(d)];
+  if(d[15]===2)return[2,sff2(d)];
+  throw new Error('versi SFF '+d[15]+' tidak dikenal');
+}
+/* ---------- SND ---------- */
+function* sndBaca(d){
+  if(!sig(d,'ElecbyteSnd'))throw new Error('bukan file SND');
+  const v=dvOf(d),n=v.getUint32(16,true);let off=v.getUint32(20,true);
+  for(let k=0;k<n;k++){
+    if(off<=0||off+16>d.length)break;
+    const nxt=v.getUint32(off,true),ln=v.getUint32(off+4,true),g=v.getUint32(off+8,true),s=v.getUint32(off+12,true);
+    yield{g,s,data:d.subarray(off+16,off+16+ln)};
+    if(!nxt)break;off=nxt;
+  }
+}
+function infoWav(b){
+  try{const v=dvOf(b),c=v.getUint16(22,true),sr=v.getUint32(24,true),br=v.getUint32(28,true),bits=v.getUint16(34,true);
+    return sr+'Hz '+bits+'bit '+(c===2?'stereo':'mono')+' ~'+((b.length-44)/br).toFixed(1)+'dtk'}catch(e){return'?'}
+}
+/* ---------- util ---------- */
+function toPng(r){
+  return new Promise(res=>{
+    const c=document.createElement('canvas');c.width=r.w||1;c.height=r.h||1;
+    const x=c.getContext('2d'),im=x.createImageData(c.width,c.height),o=im.data,px=r.px,p=r.pal;
+    for(let k=0;k<px.length;k++){const q=px[k];o[4*k]=p[3*q];o[4*k+1]=p[3*q+1];o[4*k+2]=p[3*q+2];o[4*k+3]=q?255:0}
+    x.putImageData(im,0,0);c.toBlob(res,'image/png');
+  });
+}
+const crcT=(()=>{const t=[];for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0}return t})();
+const crc32=u=>{let c=0xFFFFFFFF;for(let i=0;i<u.length;i++)c=crcT[(c^u[i])&255]^(c>>>8);return(c^0xFFFFFFFF)>>>0};
+function zip(files){
+  const enc=new TextEncoder(),parts=[],cen=[];let off=0;
+  for(const f of files){
+    const nm=enc.encode(f.name),crc=crc32(f.data),sz=f.data.length;
+    const lh=new DataView(new ArrayBuffer(30));
+    lh.setUint32(0,0x04034b50,true);lh.setUint16(4,20,true);lh.setUint16(6,0x0800,true);
+    lh.setUint32(14,crc,true);lh.setUint32(18,sz,true);lh.setUint32(22,sz,true);lh.setUint16(26,nm.length,true);
+    parts.push(new Uint8Array(lh.buffer),nm,f.data);
+    const ch=new DataView(new ArrayBuffer(46));
+    ch.setUint32(0,0x02014b50,true);ch.setUint16(4,20,true);ch.setUint16(6,20,true);ch.setUint16(8,0x0800,true);
+    ch.setUint32(16,crc,true);ch.setUint32(20,sz,true);ch.setUint32(24,sz,true);ch.setUint16(28,nm.length,true);ch.setUint32(42,off,true);
+    cen.push(new Uint8Array(ch.buffer),nm);
+    off+=30+nm.length+sz;
+  }
+  let cs=0;cen.forEach(x=>cs+=x.length);
+  const e=new DataView(new ArrayBuffer(22));
+  e.setUint32(0,0x06054b50,true);e.setUint16(8,files.length,true);e.setUint16(10,files.length,true);e.setUint32(12,cs,true);e.setUint32(16,off,true);
+  return new Blob([...parts,...cen,new Uint8Array(e.buffer)],{type:'application/zip'});
+}
+async function simpan(name,blob){
+  if(window.Android){
+    const u=new Uint8Array(await blob.arrayBuffer());let s='';
+    for(let i=0;i<u.length;i+=0x8000)s+=String.fromCharCode.apply(null,u.subarray(i,i+0x8000));
+    Android.save(name,btoa(s),blob.type||'application/octet-stream');
+  }else{
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();
+  }
+}
+const aman=s=>s.replace(/\.[^.]+$/,'').replace(/[^\w\-]+/g,'_');
+let koleksi=[];   // {name, blob} semua yang bisa diunduh
+const st=t=>$('st').textContent=t;
+/* ---------- proses file ---------- */
+async function proses(file){
+  const d=new Uint8Array(await file.arrayBuffer()),nama=file.name,dasar=aman(nama);
+  const sec=document.createElement('div');sec.className='sec';$('out').appendChild(sec);
+  const h=document.createElement('h2');sec.appendChild(h);
+  const isSnd=d.length>12&&sig(d,'ElecbyteSnd');
+  try{
+    if(isSnd){
+      let n=0;const box=document.createElement('div');sec.appendChild(box);
+      for(const s of sndBaca(d)){
+        const blob=new Blob([s.data],{type:'audio/wav'}),nm=s.g+'_'+s.s,url=URL.createObjectURL(blob);
+        const a=document.createElement('div');a.className='a';a.dataset.n=nm;
+        a.innerHTML='<div>'+nm+' '+infoWav(s.data)+'</div><audio controls preload="none" src="'+url+'"></audio>';
+        const b=document.createElement('button');b.className='s';b.textContent='Unduh WAV';b.style.marginTop='4px';
+        b.onclick=()=>simpan(dasar+'_'+nm+'.wav',blob);a.appendChild(b);box.appendChild(a);
+        koleksi.push({name:dasar+'/'+nm+'.wav',blob});n++;
+      }
+      h.textContent=nama+' (SND, '+n+' suara)';
+    }else{
+      const[ver,gen]=sffBaca(d);let n=0,gagal=0;const g=document.createElement('div');g.className='grid';sec.appendChild(g);
+      for await(const r of gen){
+        n++;const nm=r.g+'_'+r.i;let blob=null;
+        if(r.px)blob=await toPng(r);else if(r.png)blob=new Blob([r.png],{type:'image/png'});
+        const c=document.createElement('div');c.className='c';c.dataset.n=nm;
+        if(blob){
+          const im=document.createElement('img');im.src=URL.createObjectURL(blob);c.appendChild(im);
+          c.onclick=()=>simpan(dasar+'_'+nm+'.png',blob);
+          koleksi.push({name:dasar+'/'+nm+'.png',blob});
+        }else{gagal++;const e=document.createElement('div');e.className='err';e.textContent=r.err||'gagal';c.appendChild(e)}
+        const sp=document.createElement('span');sp.textContent=nm;c.appendChild(sp);g.appendChild(c);
+        if(n%20===0){h.textContent=nama+' ... '+n;await new Promise(r=>setTimeout(r))}
+      }
+      h.textContent=nama+' (SFF v'+ver+', '+n+' sprite'+(gagal?', gagal '+gagal:'')+')  - ketuk gambar untuk unduh';
+    }
+  }catch(e){h.textContent=nama+' GAGAL: '+e.message}
+}
+$('pick').onclick=()=>$('f').click();
+$('f').onchange=async e=>{
+  const fs=[...e.target.files];if(!fs.length)return;
+  $('out').innerHTML='';koleksi=[];$('zipb').style.display='none';
+  for(let k=0;k<fs.length;k++){st('Memproses '+(k+1)+'/'+fs.length+': '+fs[k].name);await proses(fs[k])}
+  st('Selesai. '+koleksi.length+' item.');
+  if(koleksi.length)$('zipb').style.display='';
+  e.target.value='';
+};
+$('zipb').onclick=async()=>{
+  st('Membuat ZIP...');
+  const files=[];for(const k of koleksi)files.push({name:k.name,data:new Uint8Array(await k.blob.arrayBuffer())});
+  await simpan('MugenTools_hasil.zip',zip(files));st('ZIP dibuat.');
+};
+$('q').oninput=()=>{
+  const t=$('q').value.toLowerCase();
+  document.querySelectorAll('[data-n]').forEach(x=>x.style.display=x.dataset.n.toLowerCase().includes(t)?'':'none');
+};
+</script></body></html>
